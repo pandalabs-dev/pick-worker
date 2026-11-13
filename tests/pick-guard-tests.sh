@@ -59,6 +59,7 @@ workflow 'path lacks picker' '' "$TMP/without" deny "$no_workflow"
 workflow 'newline script wins over path' $'\n' "$TMP/with" deny "$no_workflow"
 workflow 'script wins over path' 'agent()' "$TMP/with" deny "$no_workflow"
 workflow 'no script or path' '' '' allow
+case_name='resume of a run is let through'; jq -nc '{tool_name:"Workflow",tool_input:{script:"agent()",resumeFromRunId:"wf_abc123-def"}}' > "$TMP/input"; check allow
 workflow 'unreadable path' '' "$TMP/missing" allow
 case_name='invalid JSON'; printf '{' > "$TMP/input"; check allow
 case_name='NUL in JSON'; printf '{"tool_name":"Agent","tool_input":{"model":"opus\\u0000"}}' > "$TMP/input"; check allow

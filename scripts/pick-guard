@@ -44,6 +44,10 @@ case "$tool" in
     [ "$model" = "$needed" ] || deny "The pick says $pick, so this launch must pass model: \"$needed\" (it passed: ${model:-none})."
     ;;
   Workflow)
+    # A resume replays a run that was already let through; a forced script edit would discard its cached agents.
+    resume="$(field '.tool_input.resumeFromRunId')" || exit 0
+    resume="${resume%.}"
+    [ -n "$resume" ] && exit 0
     script="$(field '.tool_input.script')" || exit 0
     script="${script%.}"
     if [ -z "$script" ]; then
