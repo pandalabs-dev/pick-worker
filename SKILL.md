@@ -33,13 +33,13 @@ Take its answer. It prints one line: the pick, the score and tier, the reason wi
 
 What the script does:
 
-| Score | Tier | Codex side | Claude side |
-|---|---|---|---|
-| 1 to 15 | inline | (none) | do it yourself |
-| 16 to 35 | easy | `gpt-6-luna` | Opus 5.5 |
-| 36 to 60 | standard | `gpt-6.1-terra` | Opus 5.5 |
-| 61 to 80 | hard | `gpt-6.1-sol` | Opus 5.5 |
-| 81 to 100 | hardest | `gpt-6-astra` | Fable 5.2 while fable is below 80 %, else Opus 5.5 |
+| Score | Tier | Codex side | Supervisor of a Codex pick | Claude side |
+|---|---|---|---|---|
+| 1 to 15 | inline | (none) | (none) | do it yourself |
+| 16 to 35 | easy | `gpt-6-luna` | main session | Opus 5.5 |
+| 36 to 60 | standard | `gpt-6.1-terra` | Sonnet 5.5 | Opus 5.5 |
+| 61 to 80 | hard | `gpt-6.1-sol` | Opus 5.5 | Opus 5.5 |
+| 81 to 100 | hardest | `gpt-6-astra` | Opus 5.5 | Fable 5.2 while fable is below 80 %, else Opus 5.5 |
 
 Codex effort is always `xhigh`. The side with the lower weekly percentage gets the task; a tie goes to Claude. Overrides, in this order: `--claude-only` gives Claude; Codex usage unknown (no `codex` binary, no Codex section in Altseat, a value shown as `--`, Codex numbers still older than 30 minutes after the refresh, or a Codex login the refresh or the list marks as not usable) gives Claude; Codex week 95 % or more gives Claude; Claude week 95 % or more gives Codex.
 
@@ -47,8 +47,12 @@ Codex effort is always `xhigh`. The side with the lower weekly percentage gets t
 
 - `claude opus`: Agent or `agent()` with `model: "opus"`.
 - `claude fable`: Agent or `agent()` with `model: "fable"`.
-- `codex <model> effort=xhigh`: agent type `codex-operator` (Opus supervisor, contract `~/.claude/agents/codex-operator.md`). The brief names the Codex model and effort `xhigh`. Where that type is not offered, `general-purpose` with `model: "opus"` and the order to read the contract first.
+- `codex <model> effort=xhigh supervisor=main`: no subagent. The orchestrator runs `~/.claude/skills/pick-worker/scripts/codex-run` itself in the background and verifies the result by the contract `~/.claude/agents/codex-operator.md`.
+- `codex <model> effort=xhigh supervisor=sonnet` or `supervisor=opus`: agent type `codex-operator` with `model: "sonnet"` or `model: "opus"` (contract `~/.claude/agents/codex-operator.md`). The brief names the Codex model and effort `xhigh`. Where that type is not offered, `general-purpose` with the same model and the order to read the contract first.
+- A supervisor that cannot close a point after two fix rounds, or is unsure about a finding, hands the task back, and it continues under an Opus supervisor.
 - `inline`: do it yourself, no subagent.
+
+How to run Codex: `codex-run --model <id> --task <file> --out <dir> [--workspace <dir>] [--resume <thread_id>] [--no-git] [--print-cmd]`. It puts the run rules (`scripts/codex-rules.md`) in front of the task, picks the sandbox (a profile that lets Codex commit and push the task's branch; `--no-git` for review and analysis runs without git writes; full access only on the box `claudeworker`), keeps the output in `--out` (never inside a repo) and prints `thread_id=`, `last=`, `events=` and `exit=`. Its exit code is Codex's; 2 means bad arguments, 3 means no sandbox is usable on this host.
 
 Put the pick and its one-line reason into the brief or the ledger, for example `worker: codex gpt-6.1-sol (score 62 hard, claude week 74 %, codex week 12 %)`.
 
@@ -56,10 +60,16 @@ Put the pick and its one-line reason into the brief or the ledger, for example `
 
 Source: `~/.claude/rules/delegation.md` point 6.
 
-- git writes;
+- landing on `main`, merges into `main`, branch or tag deletion, history rewrites, releases;
 - anything with secrets or live systems: Doppler, Fly, Vercel, databases, deploys, store uploads, ssh to the box;
 - browser and simulator gates;
 - tasks that need MCP tools.
+
+Commits and pushes of the task's working branch are done by Codex and are no reason for `--claude-only`.
+
+## Log
+
+Every pick is appended as one line (UTC time, a tab, the printed line) to `${XDG_STATE_HOME:-$HOME/.local/state}/pick-worker/picks.log`. `PICK_WORKER_LOG=<path>` moves it, `PICK_WORKER_LOG=off` turns it off. A failed write never changes the pick.
 
 ## If Codex fails
 
