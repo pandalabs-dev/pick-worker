@@ -49,3 +49,13 @@ It runs the tests, then copies `SKILL.md` and `scripts/pick-worker` into `~/.cla
 3. `./install.sh`, commit, push.
 
 When the tiers, the model ids or the limits change, change the table in `SKILL.md`, this README and `~/.claude/rules/delegation.md` point 3 together.
+
+## State and decisions
+
+- 2026-11-13: built on the owner's order, installed on the Mac and on the box `claudeworker` (`~/.claude/skills/pick-worker/`, the same files on both; 42 test cases pass on both). The rules `~/.claude/rules/delegation.md` (points 2, 3, 5, 6, 10) and `~/.claude/agents/codex-operator.md` (point 5) point at it. Sessions on the box use it since that day.
+- The ranking (the five score questions, the tier bounds, the model per tier, the 95 % and 80 % limits) is the orchestrator's design; the owner left it open ("rangiranje odredi sam").
+- Codex is compared with the ACTIVE Claude account only. On 2026-11-13 three of four Claude accounts stood at 100 % and the active one at 8 %, against Codex at 5 %, so picks were split about evenly. Comparing with the average of all Claude accounts was offered and the owner declined: "pick-worker onda radi good, top onda to je to tako i treba". Do not change this without his word.
+- A Codex pick runs through `codex-operator` (an Opus supervisor plus `codex exec`), not through the Codex plugin, whose forwarder does not verify results. So part of the usage of a Codex task still lands on Claude.
+- The box needed one setup step: its Codex login was not registered in Altseat, so every pick there was a Claude pick. Fixed with `altseat add personal --provider codex --primary`. A new machine needs the same.
+- On the box the Codex sandbox cannot run commands (`bwrap`, see `delegation.md` point 10a); `codex-operator` uses `--sandbox danger-full-access` there by the owner's permission. The skill does not know about this; it only picks.
+- Not built: a pick log (which worker got which task), and a check that a Codex pick really ran on Codex.
