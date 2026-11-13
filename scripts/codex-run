@@ -1,0 +1,199 @@
+#!/usr/bin/env bash
+# codex-run: run one task on the Codex CLI with the owner's run rules in front,
+# a sandbox that lets Codex commit and push the task's branch, and the output
+# kept outside the repo. Plain bash 3.2 or later; runs on macOS and Linux.
+# Exit: Codex's own exit code; 2 on bad arguments; 3 when no sandbox is usable here.
+
+set -u
+
+FULL_ACCESS_HOSTS="claudeworker"   # hosts where the owner allows --sandbox danger-full-access
+MODELS="gpt-6-luna gpt-6.1-terra gpt-6.1-sol gpt-6-astra"
+EFFORT=xhigh
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+RULES="$HERE/codex-rules.md"
+
+print_usage() {
+  echo 'usage: codex-run --model <id> --task <file> --out <dir> [--workspace <dir>] [--resume <thread_id>] [--no-git] [--print-cmd]'
+  echo "       models: $MODELS (effort is always $EFFORT)"
+}
+bad() {
+  echo "codex-run: $1" >&2
+  print_usage >&2
+  exit 2
+}
+
+# ---- arguments ---------------------------------------------------------------
+model=""; task=""; out=""; ws=""; resume=""; no_git=0; print_cmd=0
+need_val() { [ $# -ge 2 ] && [ -n "$2" ] || bad "$1 needs a value"; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) print_usage; exit 0 ;;
+    --model)     need_val "$@"; model="$2"; shift 2 ;;
+    --task)      need_val "$@"; task="$2"; shift 2 ;;
+    --out)       need_val "$@"; out="$2"; shift 2 ;;
+    --workspace) need_val "$@"; ws="$2"; shift 2 ;;
+    --resume)    need_val "$@"; resume="$2"; shift 2 ;;
+    --model=*)     model="${1#*=}"; shift ;;
+    --task=*)      task="${1#*=}"; shift ;;
+    --out=*)       out="${1#*=}"; shift ;;
+    --workspace=*) ws="${1#*=}"; shift ;;
+    --resume=*)    resume="${1#*=}"; shift ;;
+    --no-git)    no_git=1; shift ;;
+    --print-cmd) print_cmd=1; shift ;;
+    *) bad "unknown argument: $1" ;;
+  esac
+done
+
+[ -n "$model" ] || bad "missing --model"
+case " $MODELS " in *" $model "*) ;; *) bad "unknown model: $model" ;; esac
+[ -n "$task" ] || bad "missing --task"
+[ -f "$task" ] && [ -r "$task" ] || bad "task file not readable: $task"
+[ -n "$out" ] || bad "missing --out"
+[ -f "$RULES" ] || bad "rules file missing: $RULES"
+
+[ -n "$ws" ] || ws="$(pwd)"
+[ -d "$ws" ] || bad "workspace is not a folder: $ws"
+ws="$(cd "$ws" && pwd -P)"
+
+# ---- output folder: never inside a git work tree unless ignored there --------
+abs_path() {  # absolute path of a folder that may not exist yet
+  local p="$1" rest=""
+  case "$p" in /*) ;; *) p="$(pwd)/$p" ;; esac
+  while [ ! -d "$p" ]; do
+    rest="/$(basename "$p")$rest"; p="$(dirname "$p")"
+  done
+  echo "$(cd "$p" && pwd -P)$rest"
+}
+out="$(abs_path "$out")"
+# The nearest folder of $out that exists decides which work tree (if any) holds it.
+probe="$out"; while [ ! -d "$probe" ]; do probe="$(dirname "$probe")"; done
+if [ "$(git -C "$probe" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
+  if ! git -C "$probe" check-ignore -q "$out/" 2>/dev/null; then
+    bad "--out is inside the git work tree $(git -C "$probe" rev-parse --show-toplevel) and not ignored there; run output never enters a repo"
+  fi
+fi
+
+# ---- workspace facts ----------------------------------------------------------
+is_git=0; is_worktree=0; branch=none; gitdir=""; common=""; top=""
+if [ "$(git -C "$ws" rev-parse --is-inside-work-tree 2>/dev/null)" = true ]; then
+  is_git=1
+  gitdir="$(cd "$(git -C "$ws" rev-parse --absolute-git-dir)" && pwd -P)"
+  common="$(cd "$ws" && cd "$(git rev-parse --git-common-dir)" && pwd -P)"
+  top="$(cd "$(git -C "$ws" rev-parse --show-toplevel)" && pwd -P)"
+  [ "$gitdir" != "$common" ] && is_worktree=1
+  b="$(git -C "$ws" branch --show-current 2>/dev/null)"
+  [ -n "$b" ] && branch="$b"
+fi
+
+# ---- sandbox ------------------------------------------------------------------
+os="${CODEX_RUN_UNAME:-$(uname -s)}"
+host="${CODEX_RUN_HOST:-$(hostname)}"; host="${host%%.*}"
+
+toml_str() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '"%s"' "$s"; }
+
+roots='"."="write"'
+extra=""
+if [ "$is_git" = 1 ] && [ "$no_git" = 0 ]; then
+  roots="$roots,\".git\"=\"write\""
+  if [ "$is_worktree" = 1 ]; then
+    extra="$extra,$(toml_str "$common")=\"write\",$(toml_str "$gitdir")=\"write\""
+  elif [ "$ws" != "$top" ]; then
+    extra="$extra,$(toml_str "$gitdir")=\"write\""   # started in a subfolder of the checkout
+  fi
+fi
+fs="{\":workspace_roots\"={$roots}$extra,\"~/Library/pnpm/store\"=\"write\",\"~/.local/share/pnpm/store\"=\"write\",\"~/.npm\"=\"write\",\"~/.nuget/packages\"=\"write\"}"
+PROFILE=(
+  -c 'default_permissions="git-write"'
+  -c 'permissions.git-write.extends=":workspace"'
+  -c 'permissions.git-write.network.enabled=true'
+  -c "permissions.git-write.filesystem=$fs"
+)
+
+codex_home_from_altseat() {
+  # Same account choice as the owner's shell function around `codex`.
+  [ -n "${CODEX_HOME:-}" ] && return
+  local a="" d=""
+  if command -v altseat >/dev/null 2>&1; then a="$(command -v altseat)"
+  elif [ -x "$HOME/.local/bin/altseat" ]; then a="$HOME/.local/bin/altseat"
+  fi
+  [ -n "$a" ] || return
+  d="$("$a" pick codex 2>/dev/null)" || return
+  [ -n "$d" ] && export CODEX_HOME="$d"
+  return 0
+}
+codex_home_from_altseat
+
+sandbox=""
+case "$os" in
+  Darwin) sandbox=profile ;;
+  Linux)
+    if (cd "$ws" && codex sandbox "${PROFILE[@]}" -- true) </dev/null >/dev/null 2>&1; then
+      sandbox=profile
+    else
+      case " $FULL_ACCESS_HOSTS " in
+        *" $host "*) sandbox=full-access ;;
+        *) echo "codex-run: no Codex sandbox works on this host ($host) and full access is not allowed here" >&2; exit 3 ;;
+      esac
+    fi ;;
+  *) echo "codex-run: unsupported OS: $os" >&2; exit 3 ;;
+esac
+
+if [ "$sandbox" = profile ]; then
+  SB=("${PROFILE[@]}")
+elif [ -n "$resume" ]; then
+  SB=(-c 'sandbox_mode="danger-full-access"')
+else
+  SB=(--sandbox danger-full-access)
+fi
+
+# ---- output files -------------------------------------------------------------
+n=""; i=1
+while [ -e "$out/codex-events$n.jsonl" ] || [ -e "$out/codex-last$n.md" ]; do
+  i=$((i + 1)); n="-$i"
+done
+events="$out/codex-events$n.jsonl"
+last="$out/codex-last$n.md"
+errlog="$out/codex-stderr.log"
+
+# ---- command ------------------------------------------------------------------
+GITCHECK=()
+[ "$is_git" = 1 ] || GITCHECK=(--skip-git-repo-check)
+COMMON=(--json -m "$model" -c "model_reasoning_effort=\"$EFFORT\"" "${SB[@]}" "${GITCHECK[@]+"${GITCHECK[@]}"}" -o "$last")
+if [ -n "$resume" ]; then
+  CMD=(codex exec resume "${COMMON[@]}" "$resume" -)
+else
+  CMD=(codex exec "${COMMON[@]}" -C "$ws" -)
+fi
+
+prompt() {
+  if [ -n "$resume" ]; then
+    echo "The run rules from the start of this session still hold."
+    echo
+  else
+    cat "$RULES"
+    echo
+    echo "Workspace: $ws. Branch: $branch."
+    echo
+  fi
+  cat "$task"
+}
+
+if [ "$print_cmd" = 1 ]; then
+  echo "sandbox=$sandbox"
+  echo "workspace=$ws"
+  printf '%s\n' "${CMD[@]}"
+  exit 0
+fi
+
+mkdir -p "$out" || { echo "codex-run: cannot create $out" >&2; exit 2; }
+{ echo "---- $(date -u +%Y-%m-%dT%H:%M:%SZ) codex-run sandbox=$sandbox events=$events"; } >>"$errlog"
+prompt | (cd "$ws" && "${CMD[@]}") >"$events" 2>>"$errlog"
+rc=${PIPESTATUS[1]}
+
+thread="$(grep -o '"thread_id":"[^"]*"' "$events" 2>/dev/null | head -1 | cut -d'"' -f4)"
+echo "thread_id=$thread"
+echo "last=$last"
+echo "events=$events"
+echo "exit=$rc"
+exit "$rc"

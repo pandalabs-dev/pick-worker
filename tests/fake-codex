@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Test stand-in for the codex CLI, used by codex-run-tests.sh.
+# Records its arguments (one per line) and its stdin into $FAKE_CODEX_DIR.
+# `codex sandbox ...` exits with $FAKE_SANDBOX_RC (default 0).
+# `codex exec ...` prints one thread.started event, writes the -o file and exits with $FAKE_EXEC_RC (default 0).
+d="${FAKE_CODEX_DIR:?}"
+if [ "${1:-}" = sandbox ]; then
+  printf '%s\n' "$@" > "$d/sandbox-args"
+  exit "${FAKE_SANDBOX_RC:-0}"
+fi
+printf '%s\n' "$@" > "$d/args"
+pwd -P > "$d/cwd"
+cat > "$d/stdin"
+o=""; prev=""
+for a in "$@"; do [ "$prev" = -o ] && o="$a"; prev="$a"; done
+echo '{"type":"thread.started","thread_id":"0000-fake-thread"}'
+echo '{"type":"turn.completed"}'
+[ -n "$o" ] && echo "fake last message" > "$o"
+exit "${FAKE_EXEC_RC:-0}"

@@ -3,6 +3,7 @@
 # difficulty score and the weekly usage of the active Claude account and Codex.
 # Plain bash 3.2 or later, no dependencies; runs on macOS and Linux.
 # Prints exactly one line: "<pick> | score N <tier> | <reason>".
+# Each pick is also appended to a log (see log_pick below).
 # Exit 0 on a pick, 2 on bad arguments.
 
 set -u
@@ -65,10 +66,28 @@ case "$tier" in
   *)        codex_model="" ;;
 esac
 
+# Who supervises a Codex pick: the main session, a Sonnet 5.5 or an Opus 5.5 codex-operator.
+case "$tier" in
+  easy)     supervisor=main ;;
+  standard) supervisor=sonnet ;;
+  *)        supervisor=opus ;;
+esac
+
 head="score $score $tier"
 
+# One line per pick: UTC time, a tab, the printed line.
+# PICK_WORKER_LOG=<path> moves the file, PICK_WORKER_LOG=off turns it off.
+# A failed write never changes the pick or the exit code.
+log_pick() {
+  local f="${PICK_WORKER_LOG:-${XDG_STATE_HOME:-$HOME/.local/state}/pick-worker/picks.log}"
+  [ "$f" = off ] && return 0
+  { mkdir -p "$(dirname "$f")" && printf '%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$f"; } 2>/dev/null
+  return 0
+}
+say() { echo "$1"; log_pick "$1"; }
+
 if [ "$tier" = inline ]; then
-  echo "inline | $head | 15 or below: do it yourself, no subagent"
+  say "inline | $head | 15 or below: do it yourself, no subagent"
   exit 0
 fi
 
@@ -246,7 +265,7 @@ fi
 
 # ---- worker ------------------------------------------------------------------
 if [ "$side" = codex ]; then
-  pick="codex $codex_model effort=$EFFORT"
+  pick="codex $codex_model effort=$EFFORT supervisor=$supervisor"
 elif [ "$tier" = hardest ]; then
   if [ -z "$fable" ]; then
     pick="claude opus"; why="$why; fable usage unknown: opus instead of fable"
@@ -265,5 +284,5 @@ if [ "$have_usage" = 0 ] && [ "$need_usage" = 1 ]; then
   is_stale "$claude_age" && why="$why; claude numbers $claude_age_txt"
 fi
 
-echo "$pick | $head | $why"
+say "$pick | $head | $why"
 exit 0

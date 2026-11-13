@@ -6,6 +6,7 @@ P="$HERE/../scripts/pick-worker"
 F="$HERE/fake-altseat"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+export PICK_WORKER_LOG=off   # the log cases at the end set their own file
 t() { out="$("$P" "$@" 2>&1)"; rc=$?; printf '%s\texit %s\t%s\n' "$*" "$rc" "$(echo "$out" | head -1)"; }
 U() { echo "claude_week=$1 fable=$2 codex_week=$3"; }
 # Claude side per tier (claude behind)
@@ -26,7 +27,7 @@ t 100 --usage "$(U 60 10 20)"
 # tie
 t 50 --usage "$(U 40 10 40)"
 # overrides
-t 40 --claude-only "git writes" --usage "$(U 90 10 5)"
+t 40 --claude-only "landing on main" --usage "$(U 90 10 5)"
 t 90 --claude-only "ssh to the box" --usage "$(U 90 10 5)"
 t 50 --usage "claude_week=30 fable=10 codex_week=--"
 t 50 --usage "claude_week=30 fable=10"
@@ -81,3 +82,17 @@ FAKE_LIST="$L_MARKED" lt "list marks codex login expired" 70
 FAKE_LIST="$L_CSTALE" FAKE_REFRESH='ok   a@x: usage updated' lt "claude numbers 45 min old after refresh" 70
 mkdir -p "$TMP/nocodex-bin" && for b in awk grep head bash env; do ln -s "$(command -v $b)" "$TMP/nocodex-bin"/$b; done
 out="$(FAKE_LIST="$L_FRESH" PICK_WORKER_ALTSEAT="$F" PATH="$TMP/nocodex-bin" /bin/bash "$P" 70 2>&1)"; printf '%s\texit %s\t%s\n' "stand-in: no codex on PATH; 70" "$?" "$out"
+# pick log
+lg() { label="$1"; shift; out="$(cd "$TMP" && XDG_STATE_HOME="$TMP/xdg" PICK_WORKER_LOG="$LOGF" "$P" "$@" 2>&1)"; rc=$?; printf '%s\texit %s\t%s\n' "log: $label; $*" "$rc" "$(echo "$out" | head -1)"; }
+LOGF="$TMP/state/picks.log"
+lg "written" 20 --usage "$(U 60 10 20)"
+lg "written" 10
+printf '%s\t%s\n' "log: file after two picks" "$(sed -E 's/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z/<time>/' "$LOGF" | tr '\n' '|')"
+LOGF=off
+lg "off" 20 --usage "$(U 60 10 20)"
+printf '%s\t%s\n' "log: nothing written when off" "$(ls "$TMP" | grep -cE '^(off|xdg)$')"
+LOGF=/dev/null/picks.log
+lg "unwritable path" 20 --usage "$(U 60 10 20)"
+LOGF="$TMP/state/picks.log"
+lg "bad arguments are not logged" 0
+printf '%s\t%s\n' "log: lines after a bad call" "$(wc -l < "$LOGF" | tr -d ' ')"
