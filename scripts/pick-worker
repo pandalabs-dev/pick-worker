@@ -1,0 +1,269 @@
+#!/usr/bin/env bash
+# pick-worker: choose the worker for one delegated task from a 1 to 100
+# difficulty score and the weekly usage of the active Claude account and Codex.
+# Plain bash 3.2 or later, no dependencies; runs on macOS and Linux.
+# Prints exactly one line: "<pick> | score N <tier> | <reason>".
+# Exit 0 on a pick, 2 on bad arguments.
+
+set -u
+
+STALE_MIN=30     # numbers older than this trigger one `altseat usage refresh`
+LIMIT=95         # a side at or above this weekly percentage gets no task
+FABLE_MAX=80     # Fable 5.2 only while the fable share is below this
+EFFORT=xhigh
+
+print_usage() {
+  echo 'usage: pick-worker <score 1-100> [--claude-only "<reason>"] [--usage "claude_week=N fable=N codex_week=N"]'
+}
+bad() {
+  echo "pick-worker: $1" >&2
+  print_usage >&2
+  exit 2
+}
+
+# ---- arguments ---------------------------------------------------------------
+score=""; claude_only=""; usage_arg=""; have_usage=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) print_usage; exit 0 ;;
+    --claude-only)
+      [ $# -ge 2 ] && [ -n "$2" ] || bad "--claude-only needs a reason"
+      claude_only="$2"; shift 2 ;;
+    --claude-only=*)
+      claude_only="${1#--claude-only=}"
+      [ -n "$claude_only" ] || bad "--claude-only needs a reason"
+      shift ;;
+    --usage)
+      [ $# -ge 2 ] || bad "--usage needs a value"
+      usage_arg="$2"; have_usage=1; shift 2 ;;
+    --usage=*)
+      usage_arg="${1#--usage=}"; have_usage=1; shift ;;
+    -*) bad "unknown option: $1" ;;
+    *)
+      [ -z "$score" ] || bad "more than one score: $score and $1"
+      score="$1"; shift ;;
+  esac
+done
+
+[ -n "$score" ] || bad "missing score"
+case "$score" in *[!0-9]*) bad "score must be a whole number from 1 to 100: $score" ;; esac
+score=$((10#$score))
+[ "$score" -ge 1 ] && [ "$score" -le 100 ] || bad "score must be from 1 to 100: $score"
+
+if   [ "$score" -le 15 ]; then tier=inline
+elif [ "$score" -le 35 ]; then tier=easy
+elif [ "$score" -le 60 ]; then tier=standard
+elif [ "$score" -le 80 ]; then tier=hard
+else tier=hardest
+fi
+
+case "$tier" in
+  easy)     codex_model=gpt-6-luna ;;
+  standard) codex_model=gpt-6.1-terra ;;
+  hard)     codex_model=gpt-6.1-sol ;;
+  hardest)  codex_model=gpt-6-astra ;;
+  *)        codex_model="" ;;
+esac
+
+head="score $score $tier"
+
+if [ "$tier" = inline ]; then
+  echo "inline | $head | 15 or below: do it yourself, no subagent"
+  exit 0
+fi
+
+# ---- usage -------------------------------------------------------------------
+# "" means unknown for every value below.
+claude_week=""; fable=""; codex_week=""
+claude_age=""; codex_age=""          # minutes, "" when unknown
+claude_age_txt=""; codex_age_txt=""  # as Altseat printed it
+codex_unknown_why=""
+
+is_num() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# "5 min ago" -> 5 ; "4 d ago" -> 5760 ; anything else -> 99999 (stale)
+age_minutes() {
+  local s="$1" n unit
+  case "$s" in "just now"|now) echo 0; return ;; esac
+  s="${s% ago}"
+  n="${s%% *}"; unit="${s#* }"
+  is_num "$n" || { echo 99999; return; }
+  n=$((10#$n))
+  case "$unit" in
+    s|sec|secs|second|seconds) echo 0 ;;
+    m|min|mins|minute|minutes) echo "$n" ;;
+    h|hr|hrs|hour|hours)       echo $((n * 60)) ;;
+    d|day|days)                echo $((n * 1440)) ;;
+    w|wk|week|weeks)           echo $((n * 10080)) ;;
+    *)                         echo 99999 ;;
+  esac
+}
+
+parse_given_usage() {
+  local item key val
+  for item in $usage_arg; do
+    case "$item" in *=*) ;; *) bad "--usage item without '=': $item" ;; esac
+    key="${item%%=*}"; val="${item#*=}"
+    case "$val" in --|unknown) val="" ;; esac
+    if [ -n "$val" ]; then
+      is_num "$val" || bad "--usage value must be a whole number, -- or unknown: $item"
+      val=$((10#$val))
+    fi
+    case "$key" in
+      claude_week) claude_week="$val" ;;
+      fable)       fable="$val" ;;
+      codex_week)  codex_week="$val" ;;
+      *) bad "unknown --usage key: $key (use claude_week, fable, codex_week)" ;;
+    esac
+  done
+  [ -n "$codex_week" ] || codex_unknown_why="not given in --usage"
+}
+
+find_altseat() {
+  # PICK_WORKER_ALTSEAT points at a stand-in for tests only.
+  if [ -n "${PICK_WORKER_ALTSEAT:-}" ]; then echo "$PICK_WORKER_ALTSEAT"; return; fi
+  if command -v altseat >/dev/null 2>&1; then command -v altseat
+  elif [ -x "$HOME/.local/bin/altseat" ]; then echo "$HOME/.local/bin/altseat"
+  fi
+}
+
+ALTSEAT=""
+codex_section=0; codex_name=""; codex_line=""; refresh_out=""; refreshed=0
+
+read_altseat() {
+  local out line section="" re_week re_fable re_age
+  claude_week=""; fable=""; codex_week=""; claude_age=""; codex_age=""
+  claude_age_txt=""; codex_age_txt=""; codex_section=0; codex_name=""; codex_line=""
+  out="$("$ALTSEAT" list 2>/dev/null)" || out=""
+  re_week='week ([0-9]+) %'
+  re_fable='fable ([0-9]+) %'
+  re_age='\(([^()]*)\)[[:space:]]*$'
+  while IFS= read -r line; do
+    case "$line" in
+      "") continue ;;
+      " "*|"	"*) ;;                     # account line, not active
+      "*"*) ;;                             # active account line
+      *) section="$line"; [ "$section" = "Codex" ] && codex_section=1; continue ;;
+    esac
+    case "$line" in "*"*) ;; *) continue ;; esac
+    case "$section" in
+      "Claude Code")
+        [[ "$line" =~ $re_week ]]  && claude_week="${BASH_REMATCH[1]}"
+        [[ "$line" =~ $re_fable ]] && fable="${BASH_REMATCH[1]}"
+        if [[ "$line" =~ $re_age ]]; then
+          claude_age_txt="${BASH_REMATCH[1]}"; claude_age="$(age_minutes "$claude_age_txt")"
+        fi ;;
+      Codex)
+        codex_line="$line"
+        codex_name="$(echo "$line" | awk '{print $2}')"
+        [[ "$line" =~ $re_week ]] && codex_week="${BASH_REMATCH[1]}"
+        if [[ "$line" =~ $re_age ]]; then
+          codex_age_txt="${BASH_REMATCH[1]}"; codex_age="$(age_minutes "$codex_age_txt")"
+        fi ;;
+    esac
+  done <<EOF
+$out
+EOF
+}
+
+is_stale() { [ -n "$1" ] && [ "$1" -gt "$STALE_MIN" ]; }
+
+read_live_usage() {
+  ALTSEAT="$(find_altseat)"
+  if [ -z "$ALTSEAT" ]; then
+    codex_unknown_why="altseat not found"
+    return
+  fi
+  local have_codex_bin=0
+  command -v codex >/dev/null 2>&1 && have_codex_bin=1
+
+  read_altseat
+  local need=0
+  [ -n "$claude_week" ] && { is_stale "$claude_age" || [ -z "$claude_age" ]; } && need=1
+  [ "$have_codex_bin" = 1 ] && [ -n "$codex_week" ] && { is_stale "$codex_age" || [ -z "$codex_age" ]; } && need=1
+  if [ "$need" = 1 ]; then
+    refresh_out="$("$ALTSEAT" usage refresh 2>&1)"; refreshed=1
+    read_altseat
+  fi
+
+  # The refresh prints one line per account, "ok|warn|skip <name>: <text>".
+  local refresh_line="" bad_login=""
+  if [ "$refreshed" = 1 ] && [ -n "$codex_name" ]; then
+    refresh_line="$(printf '%s\n' "$refresh_out" | grep -F " $codex_name: " | head -1)"
+    case "$refresh_line" in
+      ok\ *|"") ;;
+      *) bad_login="refresh says: ${refresh_line}" ;;
+    esac
+  fi
+  case "$codex_line" in
+    *"no usable login"*|*expired*|*revoked*|*"signed out"*|*"logged out"*)
+      bad_login="altseat list marks the login as not usable" ;;
+  esac
+
+  if [ "$have_codex_bin" = 0 ]; then
+    codex_week=""; codex_unknown_why="no codex binary on PATH"
+  elif [ "$codex_section" = 0 ]; then
+    codex_unknown_why="no Codex section in altseat list"
+  elif [ -z "$codex_week" ]; then
+    codex_unknown_why="Codex week shown as --"
+  elif [ -n "$bad_login" ]; then
+    codex_unknown_why="$bad_login"
+  elif is_stale "$codex_age" || [ -z "$codex_age" ]; then
+    codex_unknown_why="Codex numbers still ${codex_age_txt:-of unknown age} after a refresh"
+  fi
+}
+
+need_usage=1
+# claude-only outside the hardest tier needs no numbers: always Claude Opus.
+[ -n "$claude_only" ] && [ "$tier" != hardest ] && need_usage=0
+
+if [ "$need_usage" = 1 ]; then
+  if [ "$have_usage" = 1 ]; then parse_given_usage; else read_live_usage; fi
+fi
+
+show() { if [ -n "$1" ]; then echo "$1 %"; else echo "unknown"; fi; }
+nums="claude week $(show "$claude_week"), codex week $(show "$codex_week")"
+
+# ---- side --------------------------------------------------------------------
+side=claude
+if [ -n "$claude_only" ]; then
+  why="claude-only: $claude_only"
+elif [ -n "$codex_unknown_why" ]; then
+  why="$nums: codex usage unknown ($codex_unknown_why), claude"
+elif [ "$codex_week" -ge "$LIMIT" ]; then
+  why="$nums: codex at $LIMIT % or more, claude"
+elif [ -z "$claude_week" ]; then
+  why="$nums: claude usage unknown, claude by default"
+elif [ "$claude_week" -ge "$LIMIT" ]; then
+  side=codex; why="$nums: claude at $LIMIT % or more, codex"
+elif [ "$codex_week" -lt "$claude_week" ]; then
+  side=codex; why="$nums: codex is behind"
+elif [ "$claude_week" -lt "$codex_week" ]; then
+  why="$nums: claude is behind"
+else
+  why="$nums: tie goes to claude"
+fi
+
+# ---- worker ------------------------------------------------------------------
+if [ "$side" = codex ]; then
+  pick="codex $codex_model effort=$EFFORT"
+elif [ "$tier" = hardest ]; then
+  if [ -z "$fable" ]; then
+    pick="claude opus"; why="$why; fable usage unknown: opus instead of fable"
+  elif [ "$fable" -lt "$FABLE_MAX" ]; then
+    pick="claude fable"; why="$why; fable $fable % (below $FABLE_MAX)"
+  else
+    pick="claude opus"; why="$why; fable $fable % ($FABLE_MAX or more): opus instead of fable"
+  fi
+else
+  pick="claude opus"
+fi
+
+# Claude numbers that stayed old after one refresh are used but flagged.
+# (Old Codex numbers already count as "Codex usage unknown" above.)
+if [ "$have_usage" = 0 ] && [ "$need_usage" = 1 ]; then
+  is_stale "$claude_age" && why="$why; claude numbers $claude_age_txt"
+fi
+
+echo "$pick | $head | $why"
+exit 0

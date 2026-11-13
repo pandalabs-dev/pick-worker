@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Test stand-in for altseat. FAKE_LIST and FAKE_REFRESH hold the outputs.
+case "$1" in
+  list) printf '%s\n' "$FAKE_LIST" ;;
+  usage) printf '%s\n' "${FAKE_REFRESH:-}"; [ -n "${FAKE_LIST_AFTER:-}" ] && printf '%s\n' "$FAKE_LIST_AFTER" > "$FAKE_STATE" ;;
+esac
