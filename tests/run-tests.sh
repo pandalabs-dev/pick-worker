@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs every case in cases.sh and compares the output with expected.tsv,
-# then the codex-run checks in codex-run-tests.sh.
+# then the codex-run and pick-guard checks.
 # Exit 0 when all pass, 1 otherwise.
 # After an intended change of behaviour: bash tests/cases.sh > tests/expected.tsv, read the diff, commit.
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -12,3 +12,4 @@ else
   exit 1
 fi
 bash "$HERE/codex-run-tests.sh" || exit 1
+bash "$HERE/pick-guard-tests.sh" || exit 1

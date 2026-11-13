@@ -45,6 +45,8 @@ Codex effort is always `xhigh`. The side with the lower weekly percentage gets t
 
 ## Step 3: launch what it says
 
+Paste the output line into the brief as `Worker pick: <line>`.
+
 - `claude opus`: Agent or `agent()` with `model: "opus"`.
 - `claude fable`: Agent or `agent()` with `model: "fable"`.
 - `codex <model> effort=xhigh supervisor=main`: no subagent. The orchestrator runs `~/.claude/skills/pick-worker/scripts/codex-run` itself in the background and verifies the result by the contract `~/.claude/agents/codex-operator.md`.
@@ -66,6 +68,10 @@ Source: `~/.claude/rules/delegation.md` point 6.
 - tasks that need MCP tools.
 
 Commits and pushes of the task's working branch are done by Codex and are no reason for `--claude-only`.
+
+## Guard
+
+A PreToolUse hook on Agent, Task and Workflow runs `scripts/pick-guard`. A brief without the script's output line is refused; put it in the brief as `Worker pick: <line>`, and pass the model named by the pick. The agent types `web-fetch`, `claude-code-guide` and `statusline-setup` are exempt. Set `PICK_GUARD=off` to switch the guard off for one shell.
 
 ## Log
 

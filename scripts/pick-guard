@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# pick-guard: enforce a worker pick in delegated briefs and workflow scripts.
+# A broken guard always allows the tool call. Bash 3.2 or later; needs jq.
+
+[ "${PICK_GUARD:-}" = off ] && exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+input="$(cat)" || exit 0
+printf '%s' "$input" | jq -es 'length == 1 and (.[0] | type == "object") and ([.[0] | .. | strings | contains("\u0000")] | any | not)' >/dev/null 2>&1 || exit 0
+field() { printf '%s' "$input" | jq -rj "$1 | if type == \"string\" then . else \"\" end" 2>/dev/null && printf '.'; }
+tool="$(field '.tool_name')" || exit 0
+tool="${tool%.}"
+pick_re='(claude (opus|fable)|codex gpt-[0-9a-z.-]+ effort=xhigh supervisor=(main|sonnet|opus)|inline) \| score [0-9]+ [a-z]+ \|'
+no_pick='No worker pick in this brief. Before every subagent launch: 1) score the task 1 to 100 (size, freedom, depth, blast radius, verification: 0 to 20 each); 2) run ~/.claude/skills/pick-worker/scripts/pick-worker <score> (add --claude-only "<reason>" for landing on main, secrets, live systems, browser or simulator gates, MCP tools); 3) launch what it prints and put its output line into the brief as: Worker pick: <line>. Details: ~/.claude/skills/pick-worker/SKILL.md.'
+no_pick_workflow='This workflow script never mentions pick-worker. Every agent() call gets its worker from ~/.claude/skills/pick-worker/scripts/pick-worker (read the usage once at the start and pass it with --usage), and each agent prompt carries the line: Worker pick: <line>. Details: ~/.claude/skills/pick-worker/SKILL.md.'
+deny() {
+  local output
+  output="$(jq -nc --arg reason "$1" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$reason}}' 2>/dev/null)" || exit 0
+  printf '%s\n' "$output"
+  exit 0
+}
+
+case "$tool" in
+  Agent|Task)
+    subagent="$(field '.tool_input.subagent_type')" || exit 0
+    subagent="${subagent%.}"
+    case "$subagent" in web-fetch|claude-code-guide|statusline-setup) exit 0 ;; esac
+    prompt="$(field '.tool_input.prompt')" || exit 0
+    prompt="${prompt%.}"
+    [[ "$prompt" =~ $pick_re ]] || deny "$no_pick"
+    pick="${BASH_REMATCH[1]}"
+    case "$pick" in
+      inline) deny 'The pick says inline: do this task yourself, without a subagent.' ;;
+      *' supervisor=main') deny 'The pick says supervisor=main: no subagent. Run ~/.claude/skills/pick-worker/scripts/codex-run yourself and verify the result by the contract ~/.claude/agents/codex-operator.md.' ;;
+    esac
+    [ "$subagent" = fork ] && exit 0
+    case "$pick" in
+      'claude opus'|*' supervisor=opus') needed=opus ;;
+      'claude fable') needed=fable ;;
+      *' supervisor=sonnet') needed=sonnet ;;
+      *) exit 0 ;;
+    esac
+    model="$(field '.tool_input.model')" || exit 0
+    model="${model%.}"
+    [ "$model" = "$needed" ] || deny "The pick says $pick, so this launch must pass model: \"$needed\" (it passed: ${model:-none})."
+    ;;
+  Workflow)
+    script="$(field '.tool_input.script')" || exit 0
+    script="${script%.}"
+    if [ -z "$script" ]; then
+      path="$(field '.tool_input.scriptPath')" || exit 0
+      path="${path%.}"
+      [ -n "$path" ] && [ -f "$path" ] && [ -r "$path" ] || exit 0
+      script="$(cat < "$path")" 2>/dev/null || exit 0
+    fi
+    case "$script" in *pick-worker*) exit 0 ;; esac
+    [[ "$script" =~ $pick_re ]] || deny "$no_pick_workflow"
+    ;;
+esac
+exit 0

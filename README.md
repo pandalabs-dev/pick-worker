@@ -40,6 +40,10 @@ codex gpt-6.1-sol effort=xhigh | score 62 hard | claude week 74 %, codex week 12
 
 The full instructions for the orchestrator are in `SKILL.md`. The rule that orders its use is `~/.claude/rules/delegation.md`, points 2 and 3.
 
+## Guard
+
+A PreToolUse hook on Agent, Task and Workflow can run `scripts/pick-guard` to require a pick line in delegated briefs and check the chosen model. Put the output in the brief as `Worker pick: <line>`. Set `PICK_GUARD=off` to switch it off for one shell. The guard needs `jq` and fails open if it is unavailable.
+
 ## Requirements
 
 - Altseat on PATH or at `~/.local/bin/altseat`. The script reads `altseat list` and runs `altseat usage refresh` once when the numbers are older than 30 minutes.
@@ -52,7 +56,7 @@ The full instructions for the orchestrator are in `SKILL.md`. The rule that orde
 ./install.sh
 ```
 
-It runs the tests, then copies `SKILL.md`, `scripts/pick-worker`, `scripts/codex-run` and `scripts/codex-rules.md` into `~/.claude/skills/pick-worker/`. On the owner's machines `~/.claude/skills` is synced between the Mac and the box `claudeworker` (Mutagen session `claude-skills`), so one install reaches both; running it on both is harmless.
+It runs the tests, then copies `SKILL.md`, `scripts/pick-worker`, `scripts/pick-guard`, `scripts/codex-run` and `scripts/codex-rules.md` into `~/.claude/skills/pick-worker/`. On the owner's machines `~/.claude/skills` is synced between the Mac and the box `claudeworker` (Mutagen session `claude-skills`), so one install reaches both; running it on both is harmless.
 
 ## Change it
 
@@ -73,6 +77,8 @@ When the tiers, the model ids or the limits change, change the table in `SKILL.m
 - Not built: a check that a Codex pick really ran on Codex.
 
 ## History
+
+- 2026-11-13, guard for delegated work. The owner: "pick-worker mora sam da se aktivira ... mora da uvek da ima context o tome da da treba da koristi pick-worker". Added `scripts/pick-guard` for PreToolUse hooks.
 
 - 2026-11-13, Codex gets git and GitHub. The owner: "ajde da damo i codexu pristup githubu i sve sto mu treba da moze ekvivalentnije da se deli rad izmedju claude i codexa". Added `scripts/codex-run` and `scripts/codex-rules.md`: Codex commits and pushes the task's working branch itself, so commits are no longer a reason for `--claude-only`; landing on `main`, merges into `main`, branch and tag deletion, history rewrites and releases stay on Claude. A Codex pick now names a lighter supervisor where the task allows it. On the lighter supervisor: "zasto da ne, ako nece narusiti kvalitet radnji moze"; on the main session as supervisor: "i zar nadzornik ne moze da bude glavni fable 5.2 session ? i to ima smisla". The tier bounds and the supervisor per tier (easy: main session, standard: Sonnet 5.5, hard and hardest: Opus 5.5) are the orchestrator's design. Each pick is now logged.
   - The first commit made and pushed through `codex-run` was this line (Mac, worktree, 2026-11-13).
